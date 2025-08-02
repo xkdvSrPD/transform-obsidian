@@ -1,6 +1,6 @@
 import { promises as fs } from 'fs'
 import { join } from 'node:path';
-import { ensureDir } from './utils/index.js';
+import { ensureDir, parseName } from './utils/index.js';
 import { readdir, stat } from 'fs/promises';
 
 const contentDir = join(process.cwd(), 'obsidian')
@@ -86,11 +86,11 @@ async function processMarkdownFiles(mdFiles: string[], outputDir: string) {
             
             // 转换 Obsidian 图片链接格式
             const processedContent = convertObsidianImages(rawContent)
-
+            const transformFileName = parseName(filename)
             // 保存处理后的 markdown 文件
-            const mdFilePath = join(outputDir, `${filename}.md`)
+            const mdFilePath = join(outputDir, `${transformFileName}.md`)
             await fs.writeFile(mdFilePath, processedContent, 'utf-8')
-            console.log(`[transform] Processed: ${filename}.md`)
+            console.log(`[transform] Processed: ${transformFileName}.md`)
         } catch (error) {
             console.error(`[transform] Failed to process ${filePath}:`, error)
         }
