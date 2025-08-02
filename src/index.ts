@@ -1,108 +1,98 @@
 import { promises as fs } from 'fs'
 import { join } from 'node:path';
-import { Octokit } from 'octokit';
-import { config } from 'dotenv';
 import { ensureDir } from './utils/index.js';
+import { readdir, stat } from 'fs/promises';
 
-// 加载环境变量
-config();
+const contentDir = join(process.cwd(), 'obsidian')
+const contentOutputDir = join(process.cwd(), 'output', 'content')
+const imageOutputDir = join(process.cwd(), 'output', 'image')
 
-// 读取环境变量
-const githubToken = process.env.GITHUB_TOKEN;
-const githubOwner = process.env.GITHUB_OWNER;
-const githubRepo = process.env.GITHUB_REPO;
-const githubRef = process.env.GITHUB_REF;
-
-if (!githubToken) {
-    throw new Error('GITHUB_TOKEN environment variable is required');
-}
-if (!githubOwner) {
-    throw new Error('GITHUB_OWNER environment variable is required');
-}
-if (!githubRepo) {
-    throw new Error('GITHUB_REPO environment variable is required');
-}
-if (!githubRef) {
-    throw new Error('GITHUB_REF environment variable is required');
+// 清空输出目录
+async function clearOutputDirs() {
+    try {
+        await fs.rm(contentOutputDir, { recursive: true, force: true })
+        await fs.rm(imageOutputDir, { recursive: true, force: true })
+        console.log('[transform] Output directories cleared')
+    } catch (error) {
+        console.log('[transform] Output directories already clean or not exist')
+    }
 }
 
-const octokit = new Octokit({ auth: githubToken });
-const contentDir = join(process.cwd(), 'public', 'content')
-const imageDir = join(process.cwd(), 'public', 'image')
+// 递归获取指定目录下的所有文件
+async function getFilesRecursively(dir: string, extensions: string[]): Promise<string[]> {
+    const files: string[] = []
+    
+    try {
+        const entries = await readdir(dir)
+        
+        for (const entry of entries) {
+            const fullPath = join(dir, entry)
+            const stats = await stat(fullPath)
+            
+            if (stats.isDirectory()) {
+                const subFiles = await getFilesRecursively(fullPath, extensions)
+                files.push(...subFiles)
+            } else if (stats.isFile()) {
+                const ext = fullPath.split('.').pop()?.toLowerCase()
+                if (ext && extensions.includes(ext)) {
+                    files.push(fullPath)
+                }
+            }
+        }
+    } catch (error) {
+        console.error(`[transform] Error reading directory ${dir}:`, error)
+    }
+    
+    return files
+}
+
+// 清空输出目录
+await clearOutputDirs()
 
 // 确保目录存在
 await ensureDir(contentDir)
-await ensureDir(imageDir)
+await ensureDir(contentOutputDir)
+await ensureDir(imageOutputDir)
 
-// 获取 GitHub 仓库文件树
-const { data: tree } = await octokit.request(
-    'GET /repos/{owner}/{repo}/git/trees/{ref}',
-    {
-        owner: githubOwner,
-        repo: githubRepo,
-        ref: githubRef,
-        recursive: 'true'
-    }
-)
+// 获取本地文件
+const blogDir = join(contentDir, 'Blog')
+const attachmentDir = join(contentDir, 'Attachment')
 
-// 分离 markdown 文件和图片文件
-const mdFiles = tree.tree.filter(
-    (t: any) =>
-        t.type === 'blob' &&
-        t.path.startsWith('Blog/') &&
-        t.path.endsWith('.md')
-)
-
-const imageFiles = tree.tree.filter(
-    (t: any) =>
-        t.type === 'blob' &&
-        t.path.startsWith('Attachment/') &&
-        /\.(png|jpg|jpeg|gif|bmp|svg|webp)$/i.test(t.path)
-)
+const mdFiles = await getFilesRecursively(blogDir, ['md'])
+const imageFiles = await getFilesRecursively(attachmentDir, ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'svg', 'webp'])
 
 // 处理图片
 if (imageFiles.length > 0) {
-    await processImages(octokit, imageFiles, imageDir)
+    await processImages(imageFiles, imageOutputDir)
 }
 
 // 处理 Markdown 文件
 if (mdFiles.length > 0) {
-    await processMarkdownFiles(octokit, mdFiles, contentDir)
+    await processMarkdownFiles(mdFiles, contentOutputDir)
 }
 
 console.log(`[transform] Processing completed successfully`)
 console.log(`[transform] Total markdown files processed: ${mdFiles.length}`)
 console.log(`[transform] Total images processed: ${imageFiles.length}`)
 
-// 下载markdown文件函数实现
-async function processMarkdownFiles(octokit: any, mdFiles: any[], contentDir: string) {
+// 处理markdown文件函数实现
+async function processMarkdownFiles(mdFiles: string[], outputDir: string) {
     console.log(`[transform] Processing ${mdFiles.length} markdown files...`)
     
-    for (const file of mdFiles) {
+    for (const filePath of mdFiles) {
         try {
-            const { data: rawContent } = await octokit.request(
-                'GET /repos/{owner}/{repo}/contents/{path}',
-                {
-                    owner: githubOwner,
-                    repo: githubRepo,
-                    path: file.path,
-                    mediaType: { format: 'raw' }
-                }
-            )
+            const rawContent = await fs.readFile(filePath, 'utf-8')
+            const filename = filePath.split(/[\\/]/).pop()?.replace('.md', '') || 'unknown'
+            
+            // 转换 Obsidian 图片链接格式
+            const processedContent = convertObsidianImages(rawContent)
 
-            if (rawContent) {
-                const filename = file.path.split('/').pop()?.replace('.md', '') || file.sha
-                
-                // 转换 Obsidian 图片链接格式
-                const processedContent = convertObsidianImages(rawContent as unknown as string)
-
-                // 保存处理后的 markdown 文件
-                const mdFilePath = join(contentDir, `${filename}.md`)
-                await fs.writeFile(mdFilePath, processedContent, 'utf-8')
-                console.log(`[transform] Downloaded and processed: ${filename}.md`)
-            }
+            // 保存处理后的 markdown 文件
+            const mdFilePath = join(outputDir, `${filename}.md`)
+            await fs.writeFile(mdFilePath, processedContent, 'utf-8')
+            console.log(`[transform] Processed: ${filename}.md`)
         } catch (error) {
-            console.error(`[transform] Failed to download ${file.path}:`, error)
+            console.error(`[transform] Failed to process ${filePath}:`, error)
         }
     }
 
@@ -131,50 +121,24 @@ function sanitizeFileName(fileName: string): string {
         .replace(/^-|-$/g, '') // 移除开头和结尾的连字符
 }
 
-// 处理图片文件下载
-async function processImages(
-    octokit: any,
-    imageFiles: any[],
-    imageDir: string
-) {
+// 处理图片文件
+async function processImages(imageFiles: string[], outputDir: string) {
     console.log(`[transform] Processing ${imageFiles.length} images...`)
 
-    // 下载所有图片
-    for (const file of imageFiles) {
+    // 复制所有图片
+    for (const filePath of imageFiles) {
         try {
-            const { data: imageContent } = await octokit.request(
-                'GET /repos/{owner}/{repo}/contents/{path}',
-                {
-                    owner: githubOwner,
-                    repo: githubRepo,
-                    path: file.path
-                }
-            )
-
-            let buffer = undefined
             // 提取原始文件名
-            const originalFileName = file.path.split('/').pop()
+            const originalFileName = filePath.split(/[\\/]/).pop() || 'unknown'
             // 处理文件名中的空格
             const sanitizedFileName = sanitizeFileName(originalFileName)
-            const imagePath = join(imageDir, sanitizedFileName)
+            const imagePath = join(outputDir, sanitizedFileName)
             
-            if (imageContent && imageContent.content && imageContent.encoding === 'base64') {
-                // 方法1：base64 解码
-                buffer = Buffer.from(imageContent.content, 'base64')
-            } else if (imageContent && imageContent.download_url) {
-                // 方法2：直接下载
-                const response = await fetch(imageContent.download_url)
-                const arrayBuffer = await response.arrayBuffer()
-                buffer = Buffer.from(arrayBuffer)
-            }
-
-            if (buffer) {
-                await fs.writeFile(imagePath, buffer)
-                console.log(`[transform] Downloaded image: ${originalFileName} -> ${sanitizedFileName}`)
-            }
-
+            // 复制文件
+            await fs.copyFile(filePath, imagePath)
+            console.log(`[transform] Copied image: ${originalFileName} -> ${sanitizedFileName}`)
         } catch (error) {
-            console.error(`[transform] Failed to download image ${file.path}:`, error)
+            console.error(`[transform] Failed to copy image ${filePath}:`, error)
         }
     }
 
