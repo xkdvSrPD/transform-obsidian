@@ -1,7 +1,12 @@
 import { promises as fs } from 'fs'
 import { join } from 'node:path';
+import sharp from 'sharp';
 import { ensureDir, parseName } from './utils/index.js';
 import { readdir, stat } from 'fs/promises';
+
+// Sharp 支持的图片格式
+const SUPPORTED_FORMATS = ['jpg', 'jpeg', 'png', 'gif', 'tiff', 'avif']
+const UNSUPPORTED_FORMATS = ['svg', 'bmp']
 
 const contentDir = join(process.cwd(), 'obsidian')
 const contentOutputDir = join(process.cwd(), 'output', 'content')
@@ -103,42 +108,70 @@ async function processMarkdownFiles(mdFiles: string[], outputDir: string) {
 
 // 转换 Obsidian 图片链接格式
 function convertObsidianImages(content: string): string {
-    // 转换 ![[图片名称]] 为 ![图片名称](/image/图片名称)
+    // 转换 ![[图片名称]] 为 ![图片名称](/image/图片名称.webp)
     return content.replace(/!\[\[([^\]]+)\]\]/g, (match, imageName) => {
         // 提取纯文件名（去掉可能的路径）
         const originalFileName = imageName.split('/').pop() || imageName
-        // 处理文件名中的空格
-        const sanitizedFileName = sanitizeFileName(originalFileName)
-        return `![${originalFileName}](/image/${sanitizedFileName})`
+        // 获取文件扩展名
+        const fileExt = originalFileName.split('.').pop()?.toLowerCase() || ''
+        // 去掉原始扩展名，使用parseName处理文件名
+        const fileNameWithoutExt = originalFileName.replace(/\.[^.]+$/, '')
+        const processedFileName = parseName(fileNameWithoutExt)
+        
+        // 如果是不支持的格式或已经是webp，保持原格式
+        if (UNSUPPORTED_FORMATS.includes(fileExt) || fileExt === 'webp') {
+            return `![${originalFileName}](/image/${processedFileName}.${fileExt})`
+        }
+        
+        // 支持的格式转换为webp
+        return `![${originalFileName}](/image/${processedFileName}.webp)`
     })
 }
 
-// 处理文件名中的空格和特殊字符
-function sanitizeFileName(fileName: string): string {
-    return fileName
-        .replace(/\s+/g, '-')  // 将连续空格替换为单个连字符
-        .replace(/-+/g, '-')   // 将连续连字符替换为单个连字符
-        .replace(/^-|-$/g, '') // 移除开头和结尾的连字符
-}
+
 
 // 处理图片文件
 async function processImages(imageFiles: string[], outputDir: string) {
     console.log(`[transform] Processing ${imageFiles.length} images...`)
 
-    // 复制所有图片
     for (const filePath of imageFiles) {
         try {
             // 提取原始文件名
             const originalFileName = filePath.split(/[\\/]/).pop() || 'unknown'
-            // 处理文件名中的空格
-            const sanitizedFileName = sanitizeFileName(originalFileName)
-            const imagePath = join(outputDir, sanitizedFileName)
+            // 获取文件扩展名
+            const fileExt = originalFileName.split('.').pop()?.toLowerCase() || ''
+            // 去掉扩展名，使用parseName处理文件名
+            const fileNameWithoutExt = originalFileName.replace(/\.[^.]+$/, '')
+            const processedFileName = parseName(fileNameWithoutExt)
             
-            // 复制文件
-            await fs.copyFile(filePath, imagePath)
-            console.log(`[transform] Copied image: ${originalFileName} -> ${sanitizedFileName}`)
+            // 如果是不支持的格式，直接复制原文件
+            if (UNSUPPORTED_FORMATS.includes(fileExt)) {
+                const outputPath = join(outputDir, `${processedFileName}.${fileExt}`)
+                await fs.copyFile(filePath, outputPath)
+                console.log(`[transform] Copied unsupported format: ${originalFileName} -> ${processedFileName}.${fileExt}`)
+                continue
+            }
+            
+            // 如果已经是webp格式，直接复制
+            if (fileExt === 'webp') {
+                const outputPath = join(outputDir, `${processedFileName}.webp`)
+                await fs.copyFile(filePath, outputPath)
+                console.log(`[transform] Copied WebP: ${originalFileName} -> ${processedFileName}.webp`)
+                continue
+            }
+            
+            // 支持的格式压缩为webp
+            if (SUPPORTED_FORMATS.includes(fileExt)) {
+                const outputPath = join(outputDir, `${processedFileName}.webp`)
+                await sharp(filePath)
+                    .webp({ quality: 80 }) // 设置webp质量为80%
+                    .toFile(outputPath)
+                console.log(`[transform] Compressed image: ${originalFileName} -> ${processedFileName}.webp`)
+            } else {
+                console.warn(`[transform] Unknown format: ${originalFileName}, skipping...`)
+            }
         } catch (error) {
-            console.error(`[transform] Failed to copy image ${filePath}:`, error)
+            console.error(`[transform] Failed to process image ${filePath}:`, error)
         }
     }
 
